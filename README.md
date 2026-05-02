@@ -1,72 +1,99 @@
-![AI Helmet Prototype](images/ai-helmet.jpg)
+# 🍾 Bottle Detection Pipeline: Real-Time Damage Classification System
 
-# 🪖 AI Helmet: Real-Time Road Sign Detection and Alerting System
-
-This Edge Impulse project implements a **real-time, on-device road sign detection and alerting system** using the **Arduino Nicla Vision**. The goal is to prototype an **“AI Helmet”** that can detect critical road signs and provide immediate alerts to two-wheeler riders.
-
-
-## ✨ Highlights
-
-* **True on-device Edge AI solution** – All detection and alerting runs locally on the Arduino Nicla Vision (TinyML + FOMO), with **no cloud or smartphone dependency** for core functionality.
-* **Tiny but powerful model** – FOMO MobileNetV2 0.35, **int8 quantized**, fits in ~**111 KB flash** and ~**283 KB RAM**, with an inference time of **approximately 51 ms per frame** (**19.6 fps!**), enabling smooth real-time detection.
-* **Helmet-mounted, rider-centric view** – Data is collected and inferred from a **helmet-like perspective**, so the model is trained on viewpoints that closely match real riding conditions.
-* **End-to-end Edge pipeline** – Fully integrated workflow: **on-device data collection → labeling & augmentation → FOMO training in Edge Impulse → OpenMV/MicroPython deployment → real-time alerts** on the helmet.
-* **Multi-modal safety alerts** – Combines **on-frame overlays**, **RGB LED color codes**, and a **buzzer** to instantly alert riders when critical signs (e.g., *Stop*, *Go Slow*, *No Parking*, *Speed Limit*) are detected.
+This project implements a **real-time, on-device bottle damage detection and classification system** using **YOLOv8** for bottle localization and a **ResNet50V2 TFLite model** for damage classification on the **Raspberry Pi 6**.
 
 ---
 
+## 📋 Table of Contents
+
+- [Highlights](#-highlights)
+- [Repository Structure](#-repository-structure)
+- [Problem Statement](#-problem-statement)
+- [Project Objectives](#-project-objectives)
+- [Hardware & Software Used](#-hardware--software-used)
+- [Pipeline Architecture](#-pipeline-architecture)
+  - [Custom Containment NMS](#custom-containment-nms-remove_overlapping_boxes)
+- [Classifier: ResNet50V2 Training](#-classifier-resnet50v2-training-resnet50ipynb)
+  - [Dataset & Split](#dataset--split)
+  - [Augmentation Pipeline](#augmentation-pipeline)
+  - [Figure 1: Augmented Training Samples](#figure-1-augmented-training-samples)
+  - [Model Architecture](#model-architecture)
+  - [Training: Two Phases](#training-two-phases)
+  - [Figure 2: Training Curves (Phase 1 + Phase 2)](#figure-2-training-curves-phase-1--phase-2)
+  - [Figure 3: Confusion Matrix](#figure-3-confusion-matrix)
+  - [Quantization](#quantization)
+  - [Figure 4: QAT Training Curves](#figure-4-qat-training-curves)
+  - [Output Files](#output-files)
+- [Performance Benchmarks](#-performance-benchmarks-raspberry-pi-6-arm64)
+  - [Figure 5: Timing Breakdown Chart (best.pt baseline)](#figure-5-timing-breakdown-chart-bestpt-baseline)
+  - [Figure 6: QAT Model Results — 5× YOLO Speedup](#figure-6-qat-model-results--5-yolo-speedup)
+  - [Figure 7: INT8 Model Results](#figure-7-int8-model-results)
+  - [Memory Usage](#memory-usage-rpi6-8-gb-lpddr5)
+  - [Figure 8: Memory Usage Profile](#figure-8-memory-usage-profile)
+- [Usage Modes](#-usage-modes)
+  - [Image Mode](#image-mode)
+  - [Folder Mode](#folder-mode)
+  - [Camera Mode — Photo Booth Workflow](#camera-mode--photo-booth-workflow)
+  - [Figure 9: Live Detection Output](#figure-9-live-detection-output)
+- [Data Structures](#-data-structures)
+- [Raspberry Pi Setup](#-raspberry-pi-setup)
+- [Troubleshooting](#-troubleshooting)
+- [V2 Roadmap](#-v2-roadmap-scaling-to-real-time-conveyor-speeds)
+- [Team](#-team)
+
+---
+
+## ✨ Highlights
+
+* **Fully offline Edge AI pipeline** — All detection and classification runs locally on the Raspberry Pi 6 with **no cloud or internet dependency** for core functionality.
+* **Two-stage architecture** — YOLOv8 handles fast spatial bottle localization across the full frame; ResNet50V2 provides high-fidelity per-crop defect analysis with richer texture features than a single-model head alone.
+* **Tiny but capable classifier** — ResNet50V2 INT8 quantized TFLite model (~25 MB), running at **~277 ms per bottle** on RPi6 ARM64 with the XNNPACK delegate.
+* **5× YOLO speedup via model switch** — Switching from `best.pt` (custom fine-tuned) to `yolov8n.pt` reduced YOLO inference from ~1550 ms to **~308 ms** with no accuracy configuration change. Note: the CLI defaults to `yolov8s.pt`; pass `--yolo-model yolov8n.pt` explicitly for maximum speed on RPi.
+* **Democratises QC for FMCG** — Traditional industrial vision systems cost ₹50,000+. This pipeline runs on a **₹6,000 Raspberry Pi**, making automated quality control accessible to small and mid-scale manufacturers.
+
+---
 
 ## 📁 Repository Structure
 
 ```text
-.
-├── data-collection/       # Scripts for on-device image capture using Nicla Vision + push button
-├── dataset/               # Dataset references, class info, and augmentation notes
-├── deployment/
-│   └── OpenMV/            # MicroPython/OpenMV deployment script and model file for on-device inference & alerts
-├── images/                # Photos of the prototype and example detection outputs
-└── README.md              # Project overview and documentation (this file)
-````
+bottle_pipeline/
+├── bottle_pipeline.py        # Main entry point — 3 operating modes
+├── resnet50.ipynb            # Classifier training notebook (Colab/Kaggle)
+├── setup_rpi5.sh             # 7-step installation script for Raspberry Pi
+├── requirements.txt          # Python dependencies
+└── models/
+    ├── yolov8s.pt            # YOLOv8s detection weights (default)
+    ├── yolov8n.pt            # YOLOv8n detection weights (recommended for RPi speed)
+    ├── *.tflite              # ResNet50V2 damage classifier (INT8 / QAT / FP32)
+    └── labels.txt            # Class labels: damaged, non_damaged
+```
 
 ---
 
-
 ## 🚥 Problem Statement
 
-Traffic signs are essential for communicating rules, warnings, and guidance to road users. They inform riders about:
+Packaging quality control is a critical step in FMCG manufacturing. Damaged bottles reaching consumers lead to product spoilage, customer complaints, and brand damage. Current automated inspection solutions require:
 
-* Speed limits
-* Road humps and hazards
-* Parking and no-parking zones
-* Restricted or special-use areas
+* Expensive industrial camera rigs
+* Cloud API dependencies and proprietary software licences
+* Vendor lock-in with per-unit pricing
 
-However, two-wheeler riders often fail to notice or correctly interpret these signs due to:
-
-* Visual clutter in dense urban environments
-* Poor illumination or adverse weather
-* Fatigue, distraction, or high cognitive load in traffic
-
-While modern cars increasingly offer driver-assistance features like **speed-limit recognition**, most two-wheelers—especially in developing countries like India—provide **no comparable support**. This creates a gap between the importance of road signs and the assistance available to riders.
-
-This project addresses that gap by exploring how existing helmets can be transformed into an **AI Helmet** using a small, low-power portable Edge AI device that perceives the surroundings using computer vision techniques—for example, detecting important sign boards in real time and actively alerting riders when such signs appear in their field of view.
+This project addresses that gap with a **fully open-source, offline Edge AI pipeline** that can be deployed on low-cost hardware — enabling quality control for small and mid-scale producers who previously had no viable option.
 
 ---
 
 ## 🎯 Project Objectives
 
-The main objective is to develop a prototype AI Helmet module that:
+The main objective is to develop a production-grade bottle inspection module that:
 
-* Captures the rider’s forward-facing view using a compact camera
-* Detects several categories of road and place-identification signs in real time
-* Provides immediate feedback via:
+* Detects all bottles in a frame using a real-time object detector
+* Classifies each detected bottle as `damaged` or `non_damaged` using a fine-tuned CNN
+* Provides immediate feedback via annotated frames (green = ok, red = damaged) and a JSON result log
+* Runs **entirely on-device** on a Raspberry Pi, with **no cloud dependency**
 
-  * Visual overlays (bounding boxes + labels)
-  * Simple alerts (buzzer + RGB LEDs)
-* Runs **entirely on-device** on a microcontroller-class edge platform (Arduino Nicla Vision), with **no cloud dependency**
+The prototype demonstrates an **end-to-end Edge pipeline**:
 
-The prototype demonstrates an **end-to-end Edge Impulse pipeline**:
-
-> Data collection → Dataset & labels → FOMO model training → On-device deployment → Real-time alerts in a helmet-mounted setup.
+> Dataset preparation → Transfer learning (ResNet50V2) → QAT quantization → TFLite export → On-device deployment on RPi6
 
 ---
 
@@ -74,365 +101,436 @@ The prototype demonstrates an **end-to-end Edge Impulse pipeline**:
 
 ### Hardware Required
 
-* 🧠 **Arduino Nicla Vision**
-
-  * 2 MP color camera
-  * 1 MB RAM, 16 MB QSPI flash
-  * Wi-Fi and IMU on board
-* 🔋 **USB Power Bank**
-
-  * To power the Nicla Vision on the helmet
-* 🔘 **Push Button**
-
-  * For image capture during data collection
-* 🔔 **Buzzer**
-
-  * For acoustic alerts (e.g., on critical sign detection)
-* 💡 **RGB LEDs (onboard / external)**
-
-  * For visual alerting based on detected sign type
-* 🪖 **Two-wheeler Helmet**
-
-  * To mount the Nicla Vision and power bank
-* 🔌 **Jumper wires / mounting accessories**
-
-  * For wiring, fixing the board, and cable management
+* 🧠 **Raspberry Pi 6** (ARM64, 8 GB LPDDR5)
+* 📷 **Pi Camera Module** (or USB webcam for camera mode)
+* 🔌 **USB power supply / battery bank** for portable deployment
 
 ### Software & Tools Used
 
-* 🧪 **Edge Impulse Studio**
-
-  * Data ingestion, labeling, impulse design, FOMO model training, deployment
-* 🖥️ **OpenMV IDE**
-
-  * Writing and flashing MicroPython deployment scripts to Nicla Vision
-* 🐍 **MicroPython**
-
-  * On-device runtime controlling camera, Wi-Fi, buzzer, and LEDs
-* 📦 **TensorFlow Lite (via Edge Impulse)**
-
-  * Inference engine for the deployed model
-* 🧰 **Roboflow**
-
-  * Dataset augmentation (cropping, color transforms, noise, etc.)
-* 🌐 **Web browser**
-
-  * Viewing the MJPEG debug stream during development
+* 🐍 **Python 3** with `ultralytics`, `tflite-runtime`, `opencv-python-headless`, `numpy`, `pillow`
+* 🔥 **PyTorch (ARM CPU build)** — for running YOLOv8 inference via Ultralytics
+* 📦 **TensorFlow Lite** — lightweight inference engine for the ResNet50V2 classifier
+* 🧪 **TensorFlow / Keras** — model training, evaluation, and TFLite export (run on Colab/Kaggle)
+* 🔬 **TensorFlow Model Optimization Toolkit** — for Quantization Aware Training (QAT)
+* 📊 **Matplotlib / Seaborn** — training curve and confusion matrix plots
+* 🔢 **scikit-learn** — `classification_report`, `confusion_matrix`, `compute_class_weight`
+* 🖥️ **Google Colab / Kaggle** — cloud GPU environment for training
 
 ---
 
+## 🏗️ Pipeline Architecture
 
+The pipeline uses a **two-stage architecture** (see PPT Slide 2 — Pipeline Overview):
 
-## 🧱 Hardware Platform
+| Stage | Tool | Role |
+|---|---|---|
+| 1 — Detection | YOLOv8 | Localize all bottles in the frame with configurable confidence threshold (default 0.10) |
+| 1 — NMS Filter | Custom containment NMS | Remove large wrapper boxes that contain smaller individual bottle boxes |
+| Bridge | OpenCV | Crop each bottle with 20 px padding, preserving context for the classifier |
+| 2 — Classify | ResNet50V2 TFLite | Predict `damaged` / `non_damaged` per crop; softmax probabilities logged |
+| 2 — Log Output | JSON | Save annotated image (green = ok, red = damaged), per-bottle crop files, structured JSON |
 
-**Core device:** [Arduino Nicla Vision](https://store.arduino.cc/products/nicla-vision)
+**Why two stages?** YOLO excels at robust, fast spatial detection across variable bottle counts and positions. ResNet provides richer texture-level feature extraction per crop — better suited to detecting subtle surface damage than using the YOLO classification head alone.
 
-Nicla Vision is used because it combines:
+### Custom Containment NMS (`remove_overlapping_boxes`)
 
-* 📷 **2 MP color camera**
-* 🧠 **1 MB RAM** and **16 MB QSPI flash**
-* 📏 **Tiny form factor** suitable for helmet or bike mounting
-* 💻 Support for **MicroPython**, **OpenMV**, and **Wi-Fi**
+Standard IoU-based NMS fails in two real scenarios this pipeline encounters. The custom NMS is **containment-based** and handles both (see PPT Slide 3 for the logic diagram):
 
-These capabilities make it possible to:
+1. **Duplicate box around a single bottle** — YOLO draws a tight box and a slightly larger wrapper box around the same bottle
+2. **Large wrapper box spanning multiple bottles** — YOLO draws one big box around a group of 2+ bottles alongside correct individual boxes
 
-* Capture road scenes from a **helmet-like viewpoint**
-* Run **Edge AI / TinyML models locally**
-* Stream **annotated video** to a browser (for debugging and visualization)
-
----
-
-## 📸 Data Collection
-
-Data collection is done directly **on the Nicla Vision** using the scripts in `data-collection/`:
-
-* A **push button** is wired to the board.
-* A **USB power bank** powers the setup for portable use.
-* A **MicroPython script** running on the Nicla Vision:
-
-  * Captures an image from the onboard camera
-  * Stores it in device memory each time the button is pressed
-
-Using this simple setup, we collected images of **real sign boards** around a university campus, from a perspective that approximates a **helmet-mounted camera**.
-
-![Data collection setup](images/data-collection-setup.png)
-*Figure 1: Data collection setup using Nicla Vision.*
+**Logic:** Boxes are sorted by area (largest first). A large box is removed if it contains **1 or more** smaller boxes with ≥ 80% overlap (`containment_threshold=0.80`, `iou_threshold=0.30`). Only the tightest individual-bottle boxes are forwarded to the classifier.
 
 ---
 
-## 🧮 Dataset & Augmentation
+## 🧠 Classifier: ResNet50V2 Training (`resnet50.ipynb`)
 
-The captured images are imported into **Edge Impulse** for dataset preparation.
+The damage classifier is trained in a Jupyter notebook on Colab/Kaggle using a two-phase transfer learning approach. The notebook follows a 14-step pipeline from data loading to TFLite export.
 
-To improve generalization, we apply a variety of data augmentations (via **Roboflow** and **Edge Impulse**):
+### Dataset & Split
 
-* Cropping and mild geometric transforms
-* Grayscale conversion and brightness/exposure changes
-* Hue and saturation adjustments
-* Blur and noise injection
+* **Classes:** `damaged` | `non_damaged`
+* **Split:** 70% train / 15% validation / 15% test
+* Splits are **deterministic** via `SEED=42` — files sorted before shuffle to guarantee reproducibility across runs
+* A **data leakage check** is performed post-split: `train_files.intersection(test_files)` must return zero overlap
+* Class counts verified at startup: any missing class folder prints an error before training begins
 
-**Sign-board classes:**
+### Augmentation Pipeline
 
-* `Assembly point`
-* `Go slow`
-* `No honking`
-* `No parking`
-* `Parking`
-* `Road hump`
-* `Stop`
-* `Speed limit`
+Training images are augmented on-the-fly using a `tf.keras.Sequential` augmentation block applied only during training (`training=True`):
 
-**Dataset stats:**
+| Transform | Parameter | Purpose |
+|---|---|---|
+| `RandomFlip` | horizontal | Mirror-invariance |
+| `RandomRotation` | ±10° (0.10) | Slight tilt tolerance |
+| `RandomZoom` | 10% | Scale variation |
+| `RandomBrightness` | 20% | Lighting variation |
+| `RandomContrast` | 15% | Exposure variation |
+| `GaussianNoise` | σ = 0.05 | Simulate sensor noise |
 
-* ~60 images per sign class
-* **416 images total** across all classes
-* An additional **background class** (added by Edge Impulse) represents scenes with **no sign board**, helping the model distinguish meaningful signs from ordinary road backgrounds.
+ResNet50V2 preprocessing (`preprocess_input`) is applied **after** augmentation, scaling pixel values from `[0, 255]` to `[-1, 1]` as required by the backbone. All three splits use `AUTOTUNE` prefetching for pipeline efficiency.
 
----
+### Figure 1: Augmented Training Samples
 
-## 🏷️ Annotation & Labeling
+> **`augmented_samples.png`** — 3×3 grid of augmented training images, saved during Step 5 of `resnet50.ipynb`. Shows the combined visual effect of RandomFlip, RandomRotation, RandomZoom, RandomBrightness, RandomContrast, and GaussianNoise on real bottle crops.
 
-Bounding box annotation is carried out inside **Edge Impulse** using its labeling interface:
-
-* An **AI-assisted auto-labeler** (YOLO-based) is first used to propose bounding boxes and class labels.
-* All auto-generated labels are then **manually verified and corrected** where needed.
-
-This hybrid strategy significantly speeds up labeling while maintaining high annotation quality suitable for embedded object detection.
-
----
-
-## 🧠 Model Design: FOMO for TinyML
-
-We use **Edge Impulse FOMO (Faster Objects, More Objects)** for TinyML-based object detection.
+```
+OUTPUT_DIR/augmented_samples.png
+```
 
 ### Model Architecture
 
-* Backbone: **MobileNetV2 0.35** (lightweight CNN)
-* Detection head: **FOMO** (grid-based object detection)
-* Designed to provide **class + approximate location** while fitting into a **microcontroller** memory and compute budget.
+* **Backbone:** ResNet50V2 pretrained on ImageNet (`include_top=False`, `weights='imagenet'`)
+* **Input:** 224 × 224 × 3 RGB
 
-### Input Configuration
+**Classification head:**
 
-* Input image: **96 × 96 RGB**
-* Flattened feature dimension: **27,648 (96 × 96 × 3)**
+```
+GlobalAveragePooling2D
+BatchNormalization
+Dense(256, activation='relu', kernel_regularizer=L2(1e-4))
+Dropout(0.57)
+Dense(128, activation='relu', kernel_regularizer=L2(1e-4))
+Dropout(0.30)
+Dense(2, activation='softmax')   ← damaged | non_damaged
+```
 
-### Output Classes
+Total trainable parameters: classification head only in Phase 1; head + top 30 ResNet layers in Phase 2. See PPT Slide 4 for the inference flow diagram.
 
-The model predicts **7 object classes** (non-background):
+### Training: Two Phases
 
-* `Assembly_point`
-* `Go_slow`
-* `No_Parking`
-* `No_honking`
-* `Parking`
-* `Road_hump`
-* `Stop`
+**Phase 1 — Frozen base (up to 15 epochs)**
 
-### Train / Test Split
+The ResNet50V2 backbone is fully frozen (`base_model.trainable = False`). Only the classification head trains.
 
-* **81%** of samples used for **training**
-* **19%** used for **testing**
-* **20% of the training set** is further reserved as a **validation set**
+* Optimizer: `Adam(lr=1e-3)`
+* Loss: `CategoricalCrossentropy(label_smoothing=0.1)`
+* Class weights via `compute_class_weight('balanced')` — handles imbalanced damaged/non-damaged counts
+* Callbacks: `EarlyStopping(monitor='val_accuracy', patience=5, restore_best_weights=True)`, `ReduceLROnPlateau(factor=0.5, patience=3, min_lr=1e-6)`, `ModelCheckpoint(save_best_only=True)`
 
----
+**Phase 2 — Fine-tuning top 30 layers (up to 20 epochs)**
 
-## 🧪 Training Details (Edge Impulse)
+The top 30 layers of the backbone are unfrozen (`layer.trainable = True` for `base_model.layers[-30:]`).
 
-The Keras-based object detection block in Edge Impulse uses a **FOMO-specific training script** with:
+* Optimizer: `Adam(lr=5e-6)` — deliberately low to avoid destroying pretrained weights
+* Same loss and callbacks; `EarlyStopping(patience=7)` gives more patience as improvement is slower
+* Best weights restored automatically at end of training
 
-* **Loss:** Weighted cross-entropy (using `object_weight` to emphasize objects vs. background)
-* **Epochs:** `100`
-* **Learning rate:** `0.001`
-* **Batch size:** `32`
-* **Backbone width multiplier (alpha):** `0.35`
-* **Checkpointing:** Best weights selected based on **validation F1 score (`val_f1`)**
+### Figure 2: Training Curves (Phase 1 + Phase 2)
 
-After training, an explicit **softmax** layer is added to ensure per-cell probabilities are properly normalized.
+> **`training_curves.png`** — 3-panel figure saved during Step 9 of `resnet50.ipynb` at 150 DPI. **Panel 1:** Train vs. Val accuracy across all epochs. **Panel 2:** Train vs. Val loss across all epochs. **Panel 3:** Train Precision and Recall across all epochs. A vertical dashed line marks the Phase 1 → Phase 2 boundary (fine-tune start). Title: *"ResNet50V2 — Training Curves"*.
 
-### Validation (Quantized int8 Model)
+```
+OUTPUT_DIR/training_curves.png
+```
 
-On the **validation set**, the quantized (int8) model achieves:
+### Figure 3: Confusion Matrix
 
-* **F1 score (non-background):** `0.96`
-* **Precision (non-background):** `0.98`
-* **Recall (non-background):** `0.94`
+> **`confusion_matrix.png`** — Seaborn heatmap saved during Step 10 of `resnet50.ipynb`. Test-set confusion matrix with raw counts, axes: true label (y) vs. predicted label (x). Classes: `damaged`, `non_damaged`. Title: *"Confusion Matrix — Test Set (ResNet50V2)"*.
 
-### On-Device Performance (Nicla Vision)
+```
+OUTPUT_DIR/confusion_matrix.png
+```
 
-Using the TensorFlow Lite engine for the **Arduino Nicla Vision**, Edge Impulse reports:
+### Quantization
 
-* **Inferencing time:** ≈ **51 ms** per frame
-* **Peak RAM usage:** ≈ **283.1 KB**
-* **Flash usage:** ≈ **111.0 KB**
+Two quantized variants are exported for edge deployment:
 
-This corresponds to roughly:
+**Post-Training INT8 Quantization (Step 11)**
 
-> **~19.6 frames per second (fps)**
+```python
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+converter.representative_dataset = representative_dataset_gen   # 300 calibration batches
+converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+converter.inference_input_type  = tf.float32   # float I/O avoids mismatch on RPi
+converter.inference_output_type = tf.float32
+```
 
-which is sufficient for real-time detection and alerting on the helmet.
+**Quantization Aware Training — QAT (Step 12)**
 
-![Training Results](images/training-results.png)
-*Figure 2: Training results.*
+The classification head is wrapped with `tfmot.quantization.keras.quantize_model` and the full model re-trained for up to 30 epochs at `lr=1e-5` with `EarlyStopping(patience=5)`. QAT simulates quantization noise during training, yielding **better accuracy at INT8 precision** than post-training quantization. On RPi6, QAT also runs faster (~252 ms) than the post-training INT8 model (~277 ms) because XNNPACK's FP32 SIMD kernels outperform its INT8 path on the ARM Cortex-A76 — **QAT is the recommended deployment format.**
 
-### Test Set (Unoptimized float32 Model)
+A FP32 TFLite model is also exported (no optimizations) for debugging and accuracy comparison.
 
-On the held-out test set, the **unoptimized (float32)** model achieves:
+### Figure 4: QAT Training Curves
 
-* **F1 score (non-background):** `0.93`
-* **Precision (non-background):** `0.94`
-* **Recall (non-background):** `0.93`
+> **`qat_training_curves.png`** — 2-panel figure saved during the QAT training cell of `resnet50.ipynb`. **Panel 1:** QAT training vs. validation accuracy across all QAT epochs. **Panel 2:** QAT training vs. validation loss across all QAT epochs.
 
-![Classification Results](images/classification-result.png)
-*Figure 3: Testing results.*
+```
+OUTPUT_DIR/qat_training_curves.png
+```
 
----
+### Output Files
 
-## 🧩 Impulse Design (Edge Impulse)
-
-The complete impulse in Edge Impulse consists of:
-
-1. **Input block:**
-
-   * Type: *Image data*
-   * Device: Arduino Nicla Vision
-   * Resolution: 96 × 96 RGB
-
-2. **Processing block:**
-
-   * Type: *Image* (DSP)
-   * Operations: resize, color handling, normalization
-
-3. **Learning block:**
-
-   * Type: *Object Detection (Images)*
-   * Architecture: **FOMO MobileNetV2 0.35**
-   * Output: 7 object classes + background (grid-based localization)
-
-**Public impulse details:**
-👉 [https://studio.edgeimpulse.com/public/841827/live/impulse/1/create-impulse](https://studio.edgeimpulse.com/public/841827/live/impulse/1/create-impulse)
+| File | Step | Description |
+|---|---|---|
+| `bottle_classifier_resnet50v2_fp32.keras` | 8 | Full FP32 Keras model, best Phase 2 weights |
+| `best_phase1.keras` | 7 | Best checkpoint from Phase 1 (frozen base) |
+| `best_phase2.keras` | 8 | Best checkpoint from Phase 2 (fine-tuned) |
+| `bottle_classifier_resnet50v2_int8.tflite` | 11 | INT8 post-training quantized TFLite (~22 MB) |
+| `bottle_classifier_resnet50v2_fp32.tflite` | 11 | FP32 TFLite (no quantization, for debug/comparison) |
+| `bottle_classifier_resnet50v2_qat.tflite` | 12 | QAT TFLite — **recommended for deployment** |
+| `labels.txt` | 13 | Class label list (`damaged`, `non_damaged`) |
+| `training_curves.png` | 9 | Figure 2: Accuracy / Loss / Precision+Recall (all epochs) |
+| `confusion_matrix.png` | 10 | Figure 3: Test set confusion matrix |
+| `augmented_samples.png` | 5 | Figure 1: 3×3 grid of augmented training samples |
+| `qat_training_curves.png` | 12 | Figure 4: QAT accuracy and loss curves |
 
 ---
 
-## 🚀 On-Device Deployment (OpenMV + MicroPython)
+## 📊 Performance Benchmarks (Raspberry Pi 6, ARM64)
 
-Deployment is done via the scripts in `deployment/OpenMV/`.
+All benchmarks run on RPi6 ARM64 with XNNPACK delegate. Confidence threshold: 0.10.
 
-After training and validation:
+### Figure 5: Timing Breakdown Chart (best.pt baseline)
 
-* The model is exported from Edge Impulse as an **OpenMV-compatible library**
-  (TFLite model + C++/MicroPython support code).
-* The deployment is done via the **OpenMV IDE** onto the **Arduino Nicla Vision**.
+> **PPT Slide 7** — Bar chart benchmarked on RPi6 using the original `best.pt` FP32 YOLO model. Six bars: YOLO 1 bottle (1550 ms), YOLO 2 bottles (885 ms), ResNet ×1 (280 ms), ResNet ×2 (505 ms), Total 1 bottle (2016 ms), Total 2 bottles (1559 ms). Note: *"Includes model load on first run. Subsequent calls are faster."*
 
-The **final deployed script**:
+### Inference Timing
 
-* Is based on auto-generated Edge Impulse code
-* Is enhanced with:
+| Configuration | YOLO | ResNet/bottle | Total (1 bottle) | Total (2 bottles) |
+|---|---|---|---|---|
+| FP32 (`best.pt`) | ~1550 ms | ~252 ms | **~2016 ms** | **~1559 ms** |
+| QAT (`yolov8n.pt`) | ~308 ms | ~252 ms | **~2076 ms** | **~1351 ms** |
+| INT8 (`yolov8n.pt`) | ~308 ms | ~277 ms | **~2245 ms** | **~1424 ms** |
 
-  * **Alerting logic** (buzzer + RGB LEDs)
-  * **Wi-Fi MJPEG streaming** (for debugging in a browser)
+### Figure 6: QAT Model Results — 5× YOLO Speedup
 
-### Runtime Behavior
+> **PPT Slide 12** — Shows the before/after YOLO banner: `best.pt` ~1550 ms → `yolov8n.pt` ~308 ms (**5× FASTER**). Two benchmark runs: Run 01 (7 bottles, YOLO 307.6 ms, ResNet QAT ~252 ms, total 2076 ms) and Run 02 (4 bottles, YOLO 310.9 ms, ResNet QAT ~260 ms, total 1351 ms). Key win note: switching the detection model from `best.pt` to `yolov8n.pt` achieved the speedup with no accuracy configuration change.
 
-At runtime, the MicroPython/OpenMV script running on Nicla Vision:
+### Figure 7: INT8 Model Results
 
-* Initializes:
+> **PPT Slide 13** — Three-column comparison header: FP32 best.pt (YOLO ~1550 ms, total 2016 ms), QAT yolov8n (YOLO ~308 ms, total 2076 ms), INT8 yolov8n (YOLO ~308 ms, total **2245 ms** — slower than QAT). Same two benchmark runs below. Observation panel explains the counterintuitive result: XNNPACK on RPi6's ARM Cortex-A76 does not accelerate INT8 convolutions as efficiently as FP32. QAT keeps weights in float32 at runtime — XNNPACK's highly-tuned FP32 SIMD kernels outperform its INT8 path on this SoC. INT8 wins on memory bandwidth, not compute throughput.
 
-  * The camera (RGB565, QVGA, 240×240 window)
-  * Buzzer pin
-  * RGB LEDs
-* Connects to Wi-Fi (for an optional browser-based **debug view**)
-* Continuously:
+### Memory Usage (RPi6, 8 GB LPDDR5)
 
-  * Captures frames from the onboard camera
-  * Applies the same preprocessing used during training
-  * Runs **FOMO inference** on each frame
-  * Draws bounding boxes and overlays the detected label on the image
-  * Optionally streams the annotated frames via **MJPEG** to a browser on the same network (**debug/demo only**, not required for normal helmet use)
-  * Triggers:
+| Component | RAM |
+|---|---|
+| YOLOv8n model weights | ~12 MB |
+| ResNet50V2 TFLite INT8 | ~25 MB |
+| OpenCV frame buffer | ~50 MB |
+| Python runtime + libs | ~200 MB |
+| XNNPACK delegate cache | ~30 MB |
+| OS + idle processes | ~348 MB |
+| **Pipeline peak RSS** | **~665 MB (8.1% of 8 GB)** |
 
-    * **Buzzer alerts**
-    * Different **LED colors** for specific classes (e.g., `Stop`, `Go_slow`, `No_parking`, `Speed_limit`)
+### Figure 8: Memory Usage Profile
 
-This combination of real-time detection, visual overlays, and simple acoustic/visual alerts allows the Nicla Vision module to act as an **AI Helmet assistant** without any cloud processing.
+> **PPT Slide 15** — Horizontal utilization bar showing pipeline RSS (~665 MB, 8.1%) vs. total 8 GB with ~7.4 GB free. Right panel breaks down RAM by component. Headroom section projects V2 expansion: multi-camera ×4 feeds (~2.2 GB total), 640×480 resolution input (+80 MB), Edge TPU runtime overhead (+50 MB), remaining free after V2 (>5 GB). Note: *"Only 8.1% of available RAM consumed. The pipeline can scale to 10+ simultaneous models, higher-resolution inputs, or multi-camera feeds without requiring a hardware upgrade."*
 
 ---
 
-## 🪖 AI Helmet Prototype
+## 🚀 Usage Modes
 
-The hardware prototype consists of:
+The pipeline supports three operating modes via the `--mode` flag. Entry point: `bottle_pipeline.py`. See PPT Slide 6.
 
-* An **Arduino Nicla Vision** mounted on top of a **standard two-wheeler helmet**
-* An **off-the-shelf USB power bank** fixed to the helmet or carried by the rider
+### Image Mode
 
-The setup is compact and light enough that the helmet can be worn comfortably during real-world tests.
+Single-shot inspection. Best for validation and debugging.
 
+```bash
+python bottle_pipeline.py \
+  --mode image \
+  --input photo.jpg \
+  --confidence 0.10 \
+  --output results/
+```
 
-## 🎬 Demo (Real-Time Detection)
+**Outputs:** Annotated image with green (ok) / red (damaged) bounding boxes and `{class}: {confidence}` labels, per-bottle crop files, JSON result log.
 
-Below are example frames from the real-time detection pipeline running on the AI Helmet prototype:
+### Folder Mode
 
-![Real-Time Detection 1](images/real-time-detection1.png)
-*Figure 4: Demo 1 showing the detection of Road hump sign*
+Bulk processing. Logs a summary across all images at the end.
 
+```bash
+python bottle_pipeline.py \
+  --mode folder \
+  --input images/ \
+  --output batch_results/
+```
 
-![Real-Time Detection 2](images/real-time-detection2.png)
-*Figure 5: Demo 2 showing the detection of No parking sign*
+**Outputs:** Batch JSON summary, damage rate across all images, avg processing time per image. Supports `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`.
 
+### Camera Mode — Photo Booth Workflow
 
-[![AI Helmet Demo](images/ai-helmet-youtube.png)](https://youtu.be/EtBIZRzOGV8)  
-*Click the image above to watch the AI Helmet demo video on YouTube.*
+Designed for offline QC inspection stations. Runs a repeating 3-phase loop — avoids the RPi CPU being continuously maxed between captures.
 
----
+```bash
+python bottle_pipeline.py \
+  --mode camera \
+  --camera 0 \
+  --no-display        # for headless RPi deployments
+```
 
+**Loop phases (repeating):**
+1. **Live preview + 5s countdown** — shows a live feed with *"Capturing in: N"* overlay so the operator can position bottles
+2. **Capture & process** — freezes the last frame, runs YOLO + ResNet, draws annotated results. Camera buffer set to 1 frame to minimise stale-frame lag.
+3. **Display results for 10s** — shows annotated frame with per-bottle labels; operator reads result before next cycle begins
 
-## Planned Improvements
+**Outputs:** Annotated result per capture, running session totals (total bottles / total damaged / damage rate). Keys: `q` = quit, `s` = save current annotated frame to disk. Session summary printed to terminal and saved as JSON on exit.
 
-In future iterations, we plan to:
+### Figure 9: Live Detection Output
 
-* Design a **custom 3D-printed enclosure** integrating:
-
-  * Nicla Vision
-  * Power bank
-  * Wiring and button
-* Make the module:
-
-  * More **aesthetic**
-  * More **durable**
-  * Easier to mount on a wide range of commercial helmets
-
-We also aim to extend the AI Helmet with:
-
-* Support for **more traffic signs**
-* **Real-time OCR** on place boards and speed signs, plus **speech output**
-* **Audio sensing** to understand the surrounding environment (sirens, honks, approaching vehicles, etc.)
-* Integration of additional **environmental and proximity sensors**, such as:
-
-  * Air-quality and light sensors
-  * Radar, lidar, and ultrasonic sensors
-
-These extensions will progressively enable **richer ADAS-style features** for riders, turning the AI Helmet into a **multi-sensor safety and awareness platform**.
+> **PPT Slide 11** — Real inference output on 4 bottles (Bisleri and similar PET bottles). Pipeline correctly identifies 2 as `Not Damaged` (61%, 68%) and 2 as `Damaged` (68%, 72%). All 4 have individual bounding boxes. Summary overlay top-left: *"Total: 4 | Damaged: 2 | Non Damaged: 2"*. Boxes appear green for both classes in this screenshot — in the actual runtime, damaged bottles get red boxes.
 
 ---
 
+## 🧱 Data Structures
 
-## 🌐 Edge Impulse Project Link
+Results are returned as typed Python `@dataclass` objects for type safety and easy JSON serialization. See PPT Slide 5.
 
-You can explore the full impulse design and training configuration here:
+**`BottleDetection`** — one detection + classification result per bottle:
 
-👉 **Public Edge Impulse Project:**
-[Link](https://studio.edgeimpulse.com/public/841827/live)
+```python
+@dataclass
+class BottleDetection:
+    bottle_id: int
+    bbox: Tuple[int, int, int, int]   # x1, y1, x2, y2
+    detection_confidence: float
+    damage_class: str                  # 'damaged' | 'non_damaged'
+    damage_confidence: float
+    crop_path: Optional[str]           # path to saved crop file
+```
+
+**`PipelineResult`** — full image result, serializable via `json.dump(asdict(result))`:
+
+```python
+@dataclass
+class PipelineResult:
+    image_path: str
+    timestamp: str
+    total_bottles: int
+    damaged_count: int
+    not_damaged_count: int
+    detection_time_ms: float
+    classification_time_ms: float
+    total_time_ms: float
+    detections: List[BottleDetection]
+```
+
+**JSON Output Sample (folder mode, full summary):**
+```json
+{
+  "summary": {
+    "total_images": 12,
+    "total_bottles": 48,
+    "total_damaged": 11,
+    "total_not_damaged": 37,
+    "damage_rate": "22.9%"
+  },
+  "results": [
+    {
+      "total_bottles": 3,
+      "damaged_count": 1,
+      "total_time_ms": 245.3,
+      "detections": [...]
+    }
+  ]
+}
+```
+
+Crop files are saved as `{image_name}_bottle_{id}_{class}.jpg`.
+
+---
+
+## ⚙️ Raspberry Pi Setup
+
+Run `setup_rpi5.sh` for automated 7-step installation. See PPT Slide 8.
+
+```bash
+# 1. System update
+sudo apt update && sudo apt upgrade -y
+
+# 2. System dependencies
+apt install python3-pip python3-venv libopencv-dev libatlas-base-dev cmake git
+
+# 3. Virtual environment
+python3 -m venv ~/bottle_pipeline_venv
+
+# 4. TFLite runtime
+pip install tflite-runtime
+
+# 5. PyTorch ARM CPU build
+pip install torch torchvision --index-url .../whl/cpu
+
+# 6. Ultralytics YOLO
+pip install ultralytics
+
+# 7. Other dependencies
+pip install numpy opencv-python-headless pillow
+```
+
+**Required file layout:**
+```
+bottle_pipeline/
+├── bottle_pipeline.py
+├── setup_rpi5.sh
+├── requirements.txt
+└── models/
+    ├── yolov8s.pt          ← CLI default; swap for yolov8n.pt for speed
+    ├── *.tflite
+    └── labels.txt
+```
+
+**Transfer models from PC:**
+```bash
+scp yolov8n.pt pi@raspberrypi:~/bottle_pipeline/models/
+scp *.tflite pi@raspberrypi:~/bottle_pipeline/models/
+```
+
+**Activate and run:**
+```bash
+source ~/bottle_pipeline_venv/bin/activate
+cd ~/bottle_pipeline
+# CLI default is yolov8s.pt — pass yolov8n.pt explicitly (all benchmarks use yolov8n)
+python bottle_pipeline.py --mode camera --yolo-model models/yolov8n.pt
+```
+
+---
+
+## 🔍 Troubleshooting
+
+See PPT Slide 9 for the full fault tree.
+
+| Error | Fix |
+|---|---|
+| `No module named tflite_runtime` | `pip install tflite-runtime`. Use `tflite-runtime` on RPi, not full TensorFlow. Fallback: `import tensorflow as tf` |
+| `Could not open camera` | `ls /dev/video* && raspi-config` — verify `/dev/video*` exists and enable camera interface for Pi Camera Module |
+| `YOLO model loading error` | `pip install torch torchvision --index-url .../cpu` — ensure PyTorch ARM CPU build; download index must specify `/whl/cpu` |
+| Out of memory (OOM) | Use `--yolo-model yolov8n.pt` — YOLOv8n uses far less RAM than YOLOv8s; process images one-at-a-time in folder mode |
+| Camera feed lags / stale frames | Camera mode sets `CAP_PROP_BUFFERSIZE=1` — if lag persists, add a `cap.read()` discard call before the capture step |
+
+### Speed Tuning
+
+| Knob | Recommendation |
+|---|---|
+| YOLO model size | `yolov8n.pt` > `yolov8s.pt` — 5× faster on RPi6 |
+| Resolution | 320×240 vs 640×480 → ~2× faster; camera mode defaults to 640×480 |
+| Quantization | QAT TFLite is the fastest and most accurate option on RPi6 |
+| Confidence threshold | Higher threshold → fewer crops forwarded → faster overall |
+| Batch size | Process 1 image at a time on RPi (pipeline already does this) |
+
+---
+
+## 🗺️ V2 Roadmap: Scaling to Real-Time Conveyor Speeds
+
+See PPT Slide 14.
+
+| Phase | Status | Achievements / Plan |
+|---|---|---|
+| Phase 1 — INT8 Quantization | ✅ Done | ResNet50V2 INT8v3 TFLite deployed; QAT validated at ~252 ms/bottle (QAT), ~277 ms/bottle (INT8); XNNPACK delegate enabled |
+| Phase 2 — YOLOv8n Nano Switch | ✅ Done | Switched `best.pt` → `yolov8n.pt`; YOLO 1550 ms → 308 ms (5× speedup measured on RPi6); conf=0.10 accuracy within acceptable range |
+| Phase 3 — Edge TPU Integration | 🔵 Planned | Coral USB Accelerator or Dev Board; INT8 model compiled for Edge TPU; target <50 ms/bottle end-to-end; eliminates CPU bottleneck entirely |
+| Phase 4 — Conveyor Integration | 🔵 Planned | GPIO-triggered capture via sensor; Pi Camera 3 (rolling shutter fix); continuous stream zero-buffer mode; alert output → PLC / reject actuator |
+
+**Current V1:** ~2–3.5 s/tray (batch processing, best.pt FP32, RPi CPU only — suitable for offline QC inspection workflow).
+**Target V2:** ~50 ms/bottle on continuous conveyor stream with industrial-grade zero missed-defect guarantee.
 
 ---
 
 ## 👥 Team
 
-![Team](images/team.jpg)
+* **Bottle Pipeline Team** — 2026
 
-(L to R in above image)
-
-* **Kunal Wasnik** 
-* **Sanjay Kumar**
-* **Subhasis Panda**
-* **Mentor:** Prof. Pandarasamy Arjunan, RBCCPS, Indian Institute of Science.
-
-For questions, feedback, or collaboration opportunities, please contact: **[samy@iisc.ac.in](mailto:samy@iisc.ac.in)**
+For questions, feedback, or collaboration, please open an issue in this repository.
