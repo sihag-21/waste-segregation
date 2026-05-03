@@ -4,7 +4,8 @@ This project implements a **real-time, on-device bottle damage detection and cla
 
 ---
 
-Download Dataset : https://indianinstituteofscience-my.sharepoint.com/personal/garvitsingh_iisc_ac_in/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Fgarvitsingh%5Fiisc%5Fac%5Fin%2FDocuments%2Fedge%2Dai&ga=1
+Download Dataset : https://indianinstituteofscience-my.sharepoint.com/:f:/g/personal/garvitsingh_iisc_ac_in/IgBZL7K_GBsFTKEEFdSSHR2iATd8kEWolyq1uzfXkRLRkwc?e=uzx9Id
+
 ---
 
 ## 📋 Table of Contents
